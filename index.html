@@ -5,13 +5,15 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <style>
-        #map { height: 300px; margin-top: 10px; }
+        #map { height: 300px; width: 100%; margin-top: 10px; } /* Ensure width is set */
         .tab { overflow: hidden; border: 1px solid #ccc; background-color: #f1f1f1; }
         .tab button { background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; transition: 0.3s; }
         .tab button:hover { background-color: #ddd; }
         .tab button.active { background-color: #ccc; }
         .tabcontent { display: none; padding: 6px 12px; border: 1px solid #ccc; border-top: none; }
         #debugLog { margin-top: 10px; font-size: 12px; color: #555; max-height: 100px; overflow-y: auto; }
+        .hidden { display: none; }
+        .map-note { font-size: 12px; color: #888; margin-top: 5px; }
     </style>
 </head>
 <body>
@@ -52,13 +54,14 @@
     <div id="Employee" class="tabcontent">
         <h2>Mark Attendance</h2>
         <p><strong>Your Assigned Location:</strong> <span id="assignedLocation"></span></p>
-        <p><strong>Status:</strong> <span id="status">Checking...</span></p>
-        <p><strong>Current Location:</strong> <span id="currentLocation">Fetching...</span></p>
-        <div id="map"></div>
-        <button id="markAttendance" disabled>Mark Attendance</button>
-        <button id="manualConfirm" style="display:none;" onclick="manualConfirmLocation()">Request Admin Approval</button>
-        <button id="forceLocation" style="display:none;" onclick="forceLocationOverride()">Force Use Current Location</button>
-        <button onclick="requestLocation()">Request Location Permission</button>
+        <p><strong>Status:</strong> <span id="status">Please enter your Employee ID...</span></p>
+        <p><strong>Current Location:</strong> <span id="currentLocation">Not yet fetched...</span></p>
+        <div id="map" class="hidden"></div>
+        <p id="mapNote" class="map-note hidden"></p>
+        <button id="markAttendance" class="hidden" onclick="confirmAttendance()">Mark Attendance</button>
+        <button id="manualConfirm" class="hidden" onclick="manualConfirmLocation()">Request Admin Approval</button>
+        <button id="forceLocation" class="hidden" onclick="forceLocationOverride()">Force Use Current Location</button>
+        <button id="requestPermission" onclick="requestLocation()">Request Location Permission</button>
         <div id="debugLog"></div>
     </div>
 
@@ -76,9 +79,21 @@
             }
             document.getElementById(tabName).style.display = "block";
             evt.currentTarget.className += " active";
-            if (tabName === "Employee") checkMobileNetworkLocation();
+            if (tabName === "Employee") promptEmployeeID();
         }
         document.getElementsByClassName("tablinks")[0].click();
+
+        function promptEmployeeID() {
+            let employeeID = prompt("Enter Employee ID (101 for Office, 102 for Remote):");
+            if (employeeID === null) return; // Cancelled
+            if (employeeID === "101" || employeeID === "102") {
+                localStorage.setItem("lastEmployeeID", employeeID);
+                checkMobileNetworkLocation();
+            } else {
+                alert("Invalid Employee ID! Please enter 101 or 102.");
+                promptEmployeeID();
+            }
+        }
 
         // Admin Panel Logic
         const officeLocation = { name: "Main Office Building", latitude: 23.606712, longitude: 72.375563 };
@@ -198,20 +213,73 @@
         // Employee Attendance Logic
         let map, assignedMarker, currentMarker;
 
-        function initializeMap(lat, lon) {
-            map = L.map('map').setView([lat, lon], 15);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 19,
-                attribution: '© OpenStreetMap'
-            }).addTo(map);
+        function initializeMap(lat, lon, zoom = 30) {
+            try {
+                map = L.map('map', {
+                    zoomControl: true,
+                    maxZoom: 19,
+                    minZoom: 2
+                }).setView([lat, lon], zoom);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© OpenStreetMap',
+                    errorTileUrl: 'https://example.com/blank-tile.png' // Fallback blank tile
+                }).addTo(map);
+                document.getElementById("map").classList.remove("hidden");
+                logDebug(`Map initialized at Lat: ${lat}, Lon: ${lon}, Zoom: ${zoom}`);
+            } catch (e) {
+                logDebug(`Map initialization error: ${e.message}`);
+            }
         }
 
-        function updateMap(workLat, workLon, empLat, empLon) {
+        function updateMap(workLat, workLon, empLat, empLon, distance, accuracy) {
+            if (!map) {
+                initializeMap((workLat + empLat) / 2, (workLon + empLon) / 2, 13);
+            }
+
             if (assignedMarker) map.removeLayer(assignedMarker);
             if (currentMarker) map.removeLayer(currentMarker);
+
+            // Adjust zoom level based on distance
+            let zoomLevel = 13;
+            if (distance > 10000) { // >10km
+                zoomLevel = 10;
+                map.setView([workLat, workLon], zoomLevel);
+            } else if (distance > 1000) { // 1-10km
+                zoomLevel = 12;
+                map.setView([(workLat + empLat) / 2, (workLon + empLon) / 2], zoomLevel);
+            } else {
+                map.setView([(workLat + empLat) / 2, (workLon + empLon) / 2], zoomLevel);
+            }
+
+            // Add buffer for accuracy
+            const accuracyBuffer = Math.min(accuracy / 1000, 5); // Cap buffer at 5km
+            if (accuracyBuffer > 0.5 && distance < 10000) {
+                const bounds = L.latLngBounds(
+                    [Math.max(workLat - accuracyBuffer, -90), Math.max(workLon - accuracyBuffer, -180)],
+                    [Math.min(workLat + accuracyBuffer, 90), Math.min(workLon + accuracyBuffer, 180)]
+                ).extend([empLat, empLon]);
+                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+            }
+
             assignedMarker = L.marker([workLat, workLon]).addTo(map).bindPopup('Assigned Location').openPopup();
-            currentMarker = L.marker([empLat, empLon]).addTo(map).bindPopup('Your Current Location').openPopup();
-            map.fitBounds([[workLat, workLon], [empLat, empLon]]);
+            currentMarker = L.marker([empLat, empLon]).addTo(map).bindPopup('Your Current Location');
+
+            const mapNote = document.getElementById("mapNote");
+            if (distance > 1000 || accuracy > 1000) {
+                mapNote.innerText = "Note: Your location accuracy is low or far from the assigned location. Zoom out to see both markers.";
+                mapNote.classList.remove("hidden");
+            } else {
+                mapNote.classList.add("hidden");
+            }
+
+            // Force tile reload if map is still gray
+            setTimeout(() => {
+                if (map && map.getCenter().lat === 0 && map.getCenter().lng === 0) {
+                    logDebug("Map tiles failed to load, reinitializing...");
+                    initializeMap((workLat + empLat) / 2, (workLon + empLon) / 2, 13);
+                }
+            }, 2000);
         }
 
         function getDistance(lat1, lon1, lat2, lon2) {
@@ -234,6 +302,7 @@
 
         let lastUpdateTime = 0;
         let isLocationConfirmed = false;
+        let hasLoggedCoords = false;
         function checkMobileNetworkLocation() {
             if (!navigator.geolocation) {
                 document.getElementById("status").innerText = "⚠️ Geolocation not supported!";
@@ -241,12 +310,10 @@
                 return;
             }
 
-            let employeeID = localStorage.getItem("lastEmployeeID") || prompt("Enter Employee ID (101 for Office, 102 for Remote):");
-            localStorage.setItem("lastEmployeeID", employeeID);
-
+            let employeeID = localStorage.getItem("lastEmployeeID");
             let locationData = localStorage.getItem(`location_${employeeID}`);
             if (!locationData) {
-                alert("❌ No location assigned! Contact Admin.");
+                document.getElementById("status").innerText = "❌ No location assigned! Contact Admin.";
                 document.getElementById("Employee").innerHTML = "<h2>Access Denied</h2>";
                 return;
             }
@@ -262,48 +329,55 @@
             let watchId = navigator.geolocation.watchPosition(
                 position => {
                     const now = Date.now();
-                    if (now - lastUpdateTime < 2000 || isLocationConfirmed) return; // Throttle and stop if confirmed
+                    if (now - lastUpdateTime < 2000 || isLocationConfirmed) return;
                     lastUpdateTime = now;
 
                     let empLat = position.coords.latitude;
                     let empLon = position.coords.longitude;
                     let accuracy = position.coords.accuracy;
 
-                    logDebug(`Initial coords: Lat: ${empLat}, Lon: ${empLon}, Accuracy: ${accuracy}m`);
+                    if (!hasLoggedCoords) {
+                        logDebug(`Initial coords: Lat: ${empLat}, Lon: ${empLon}, Accuracy: ${accuracy}m`);
+                        hasLoggedCoords = true;
+                    }
 
-                    if (accuracy > 500) {
+                    if (accuracy > 3000) {
                         attempts++;
-                        document.getElementById("status").innerText = `⌛ Accuracy too low (${accuracy.toFixed(0)}m > 500m), attempt ${attempts}/${maxAttempts}`;
+                        document.getElementById("status").innerText = `⌛ Accuracy too low (${accuracy.toFixed(0)}m > 3000m), attempt ${attempts}/${maxAttempts}`;
                         logDebug(`Accuracy too low, attempt ${attempts}/${maxAttempts}`);
+                        if (attempts === 1) {
+                            alert("⚠️ Poor GPS signal detected. Please go outside or to an open area for better accuracy.");
+                        }
                         if (attempts >= maxAttempts) {
-                            document.getElementById("forceLocation").style.display = "block";
-                            document.getElementById("manualConfirm").style.display = "block";
+                            document.getElementById("forceLocation").classList.remove("hidden");
+                            document.getElementById("manualConfirm").classList.remove("hidden");
                         }
                         return;
                     }
 
                     let distance = getDistance(empLat, empLon, workLat, workLon);
 
-                    if (!map) initializeMap(empLat, empLon);
-                    updateMap(workLat, workLon, empLat, empLon);
+                    if (!map) initializeMap((workLat + empLat) / 2, (workLon + empLon) / 2, 13);
+                    updateMap(workLat, workLon, empLat, empLon, distance, accuracy);
                     document.getElementById("currentLocation").innerText = `Lat: ${empLat}, Lon: ${empLon} (Accuracy: ${accuracy.toFixed(0)}m)`;
 
                     if (distance <= 300) {
                         document.getElementById("status").innerText = "✅ You are in the correct location!";
-                        document.getElementById("markAttendance").disabled = false;
-                        isLocationConfirmed = true; // Stop further updates
+                        document.getElementById("markAttendance").classList.remove("hidden");
+                        isLocationConfirmed = true;
                         navigator.geolocation.clearWatch(watchId);
+                        promptAttendance(employeeID);
                     } else {
                         document.getElementById("status").innerText = `❌ You are ${distance.toFixed(0)}m outside the workplace!`;
-                        document.getElementById("manualConfirm").style.display = "block";
-                        document.getElementById("forceLocation").style.display = "block";
+                        document.getElementById("manualConfirm").classList.remove("hidden");
+                        document.getElementById("forceLocation").classList.remove("hidden");
                         logDebug(`Employee ${distance.toFixed(0)}m away from assigned location.`);
                     }
                 },
                 error => {
                     document.getElementById("status").innerText = "⚠️ GPS failed: " + error.message;
-                    document.getElementById("manualConfirm").style.display = "block";
-                    document.getElementById("forceLocation").style.display = "block";
+                    document.getElementById("manualConfirm").classList.remove("hidden");
+                    document.getElementById("forceLocation").classList.remove("hidden");
                     logDebug("Geolocation error: " + error.message);
                     if (error.code === error.PERMISSION_DENIED) {
                         alert("❌ Location permission denied. Please enable it in your browser settings.");
@@ -317,8 +391,30 @@
             );
         }
 
+        function promptAttendance(employeeID) {
+            let message = employeeID === "101" 
+                ? "You are at the Main Office Building. Mark your attendance now?"
+                : "You are at your assigned remote location. Mark your attendance now?";
+            if (confirm(message)) {
+                confirmAttendance();
+            }
+        }
+
+        function confirmAttendance() {
+            let employeeID = localStorage.getItem("lastEmployeeID");
+            let locationData = JSON.parse(localStorage.getItem(`location_${employeeID}`));
+            let timestamp = new Date().toISOString();
+            localStorage.setItem(`attendance_${employeeID}`, JSON.stringify({
+                timestamp: timestamp,
+                fullLocation: locationData.name
+            }));
+            alert(`✅ Attendance Marked Successfully for ${employeeID === "101" ? "Office" : "Remote"} Employee!`);
+            logDebug(`Attendance marked for Employee ${employeeID}`);
+            document.getElementById("markAttendance").classList.add("hidden");
+        }
+
         function forceLocationOverride() {
-            if (confirm("Accuracy is low. Do you want to force use of the current location?")) {
+            if (confirm("Accuracy is low or distance is too far. Do you want to force use of the current location?")) {
                 let employeeID = localStorage.getItem("lastEmployeeID");
                 let locationData = JSON.parse(localStorage.getItem(`location_${employeeID}`));
                 let empLat = parseFloat(document.getElementById("currentLocation").innerText.match(/Lat: ([\d.]+)/)[1]);
@@ -327,10 +423,11 @@
 
                 if (distance <= 300) {
                     document.getElementById("status").innerText = "✅ Forced: You are in the correct location!";
-                    document.getElementById("markAttendance").disabled = false;
+                    document.getElementById("markAttendance").classList.remove("hidden");
+                    promptAttendance(employeeID);
                 } else {
                     document.getElementById("status").innerText = `❌ Forced: You are ${distance.toFixed(0)}m outside the workplace!`;
-                    document.getElementById("manualConfirm").style.display = "block";
+                    document.getElementById("manualConfirm").classList.remove("hidden");
                 }
                 logDebug("Location forced by user.");
             }
@@ -340,23 +437,12 @@
             let adminApproval = confirm("Do you want to request admin approval for attendance?");
             if (adminApproval) {
                 alert("✅ Admin will review your location!");
-                document.getElementById("markAttendance").disabled = false;
+                document.getElementById("markAttendance").classList.remove("hidden");
+                confirmAttendance();
             } else {
                 alert("❌ Attendance denied!");
             }
         }
-
-        document.getElementById("markAttendance").addEventListener("click", function() {
-            let employeeID = localStorage.getItem("lastEmployeeID");
-            let locationData = JSON.parse(localStorage.getItem(`location_${employeeID}`));
-            let timestamp = new Date().toISOString();
-            localStorage.setItem(`attendance_${employeeID}`, JSON.stringify({
-                timestamp: timestamp,
-                fullLocation: locationData.name
-            }));
-            alert("✅ Attendance Marked Successfully!");
-            logDebug(`Attendance marked for Employee ${employeeID}`);
-        });
 
         function requestLocation() {
             navigator.geolocation.getCurrentPosition(
@@ -365,10 +451,16 @@
                     let lon = position.coords.longitude;
                     let accuracy = position.coords.accuracy;
                     logDebug(`Manual request: Lat: ${lat}, Lon: ${lon}, Accuracy: ${accuracy}m`);
-                    if (accuracy > 500) {
+                    document.getElementById("currentLocation").innerText = `Lat: ${lat}, Lon: ${lon} (Accuracy: ${accuracy.toFixed(0)}m)`;
+                    if (accuracy > 3000) {
                         alert(`⚠️ Location accuracy too low (${accuracy.toFixed(0)}m). Please ensure GPS is enabled and try again outdoors.`);
                     } else {
                         alert(`✅ Location Access Granted! Lat: ${lat}, Lon: ${lon}`);
+                        let employeeID = localStorage.getItem("lastEmployeeID");
+                        if (employeeID) {
+                            hasLoggedCoords = false;
+                            checkMobileNetworkLocation();
+                        }
                     }
                 },
                 error => {
