@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Employee Attendance System</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <style>
+        #map { height: 300px; margin-top: 10px; }
+        .tab { overflow: hidden; border: 1px solid #ccc; background-color: #f1f1f1; }
+        .tab button { background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; transition: 0.3s; }
+        .tab button:hover { background-color: #ddd; }
+        .tab button.active { background-color: #ccc; }
+        .tabcontent { display: none; padding: 6px 12px; border: 1px solid #ccc; border-top: none; }
+        #debugLog { margin-top: 10px; font-size: 12px; color: #555; max-height: 100px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div class="tab">
+        <button class="tablinks" onclick="openTab(event, 'Admin')">Admin Panel</button>
+        <button class="tablinks" onclick="openTab(event, 'Employee')">Employee Attendance</button>
+    </div>
+
+    <!-- Admin Panel -->
+    <div id="Admin" class="tabcontent">
+        <h2>Admin Panel</h2>
+        <h3>Set Location for Employees</h3>
+        <label for="placeSelect">Select Location (Remote Only):</label>
+        <select id="placeSelect" onchange="updatePlaceName()">
+            <option value="">--Select a Location--</option>
+        </select>
+        <button onclick="removeLocation()">Remove Selected Location</button>
+        <br><br>
+        <label for="placeName">Or Enter Custom Location (Remote Only):</label>
+        <input type="text" id="placeName" placeholder="Enter Place Name">
+        <button onclick="addNewLocation()">Add Location</button>
+        <br><br>
+        <label for="employee">Select Employee:</label>
+        <select id="employee" onchange="updateEmployeeSelection()">
+            <option value="101">John Doe (Office)</option>
+            <option value="102">Alice Smith (Remote)</option>
+        </select>
+        <button onclick="setLocation()">Save Location</button>
+        <p><strong>Saved Location:</strong> <span id="savedLocation">None</span></p>
+        <h3>Saved Locations Log (Remote Only)</h3>
+        <ul id="locationLog"></ul>
+        <h3>View Attendance Reports</h3>
+        <button onclick="viewAttendance()">Show Report</button>
+        <ul id="attendanceLog"></ul>
+    </div>
+
+    <!-- Employee Attendance -->
+    <div id="Employee" class="tabcontent">
+        <h2>Mark Attendance</h2>
+        <p><strong>Your Assigned Location:</strong> <span id="assignedLocation"></span></p>
+        <p><strong>Status:</strong> <span id="status">Checking...</span></p>
+        <p><strong>Current Location:</strong> <span id="currentLocation">Fetching...</span></p>
+        <div id="map"></div>
+        <button id="markAttendance" disabled>Mark Attendance</button>
+        <button id="manualConfirm" style="display:none;" onclick="manualConfirmLocation()">Request Admin Approval</button>
+        <button id="forceLocation" style="display:none;" onclick="forceLocationOverride()">Force Use Current Location</button>
+        <button onclick="requestLocation()">Request Location Permission</button>
+        <div id="debugLog"></div>
+    </div>
+
+    <script>
+        // Tab Functionality
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tabcontent");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].style.display = "none";
+            }
+            tablinks = document.getElementsByClassName("tablinks");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            document.getElementById(tabName).style.display = "block";
+            evt.currentTarget.className += " active";
+            if (tabName === "Employee") checkMobileNetworkLocation();
+        }
+        document.getElementsByClassName("tablinks")[0].click();
+
+        // Admin Panel Logic
+        const officeLocation = { name: "Main Office Building", latitude: 23.606712, longitude: 72.375563 };
+        localStorage.setItem("location_101", JSON.stringify(officeLocation));
+
+        function viewAttendance() {
+            let employees = ["101", "102"];
+            let logList = document.getElementById("attendanceLog");
+            logList.innerHTML = "";
+            employees.forEach(employeeID => {
+                let record = JSON.parse(localStorage.getItem(`attendance_${employeeID}`));
+                if (record) {
+                    let listItem = document.createElement("li");
+                    listItem.innerText = `Employee ${employeeID} - ${record.timestamp} - ${record.fullLocation}`;
+                    logList.appendChild(listItem);
+                }
+            });
+        }
+
+        function loadLocations() {
+            let savedLocations = JSON.parse(localStorage.getItem("savedLocations")) || [];
+            let select = document.getElementById("placeSelect");
+            let logList = document.getElementById("locationLog");
+            select.innerHTML = '<option value="">--Select a Location--</option>';
+            logList.innerHTML = "";
+            savedLocations.forEach(place => {
+                let option = document.createElement("option");
+                option.value = place;
+                option.innerText = place;
+                select.appendChild(option);
+                let listItem = document.createElement("li");
+                listItem.innerText = place;
+                logList.appendChild(listItem);
+            });
+        }
+
+        function updatePlaceName() {
+            let selectedPlace = document.getElementById("placeSelect").value;
+            document.getElementById("placeName").value = selectedPlace;
+        }
+
+        function addNewLocation() {
+            let newPlace = document.getElementById("placeName").value.trim();
+            if (newPlace === "") {
+                alert("❌ Please enter a valid location!");
+                return;
+            }
+            let savedLocations = JSON.parse(localStorage.getItem("savedLocations")) || [];
+            if (!savedLocations.includes(newPlace)) {
+                savedLocations.push(newPlace);
+                localStorage.setItem("savedLocations", JSON.stringify(savedLocations));
+                alert(`✅ Location "${newPlace}" added successfully!`);
+                loadLocations();
+            } else {
+                alert("⚠️ Location already exists!");
+            }
+        }
+
+        function removeLocation() {
+            let selectedPlace = document.getElementById("placeSelect").value;
+            if (selectedPlace === "") {
+                alert("❌ Please select a location to remove!");
+                return;
+            }
+            let savedLocations = JSON.parse(localStorage.getItem("savedLocations")) || [];
+            let updatedLocations = savedLocations.filter(place => place !== selectedPlace);
+            localStorage.setItem("savedLocations", JSON.stringify(updatedLocations));
+            alert(`✅ Location "${selectedPlace}" removed successfully!`);
+            loadLocations();
+        }
+
+        function updateEmployeeSelection() {
+            let employeeID = document.getElementById("employee").value;
+            let locationData = JSON.parse(localStorage.getItem(`location_${employeeID}`));
+            document.getElementById("savedLocation").innerText = locationData ? `${locationData.name} (Lat: ${locationData.latitude}, Lon: ${locationData.longitude})` : "None";
+            if (employeeID === "101") {
+                document.getElementById("placeSelect").disabled = true;
+                document.getElementById("placeName").disabled = true;
+                document.getElementById("placeName").value = "Main Office Building (Fixed)";
+                alert("⚠️ Office employee location is fixed and cannot be changed.");
+            } else {
+                document.getElementById("placeSelect").disabled = false;
+                document.getElementById("placeName").disabled = false;
+                document.getElementById("placeName").value = "";
+            }
+        }
+
+        function setLocation() {
+            let employeeID = document.getElementById("employee").value;
+            if (employeeID === "101") {
+                alert("❌ Office employee location is fixed and cannot be changed!");
+                return;
+            }
+            let place = document.getElementById("placeName").value.trim();
+            if (place === "") {
+                alert("❌ Please select or enter a location!");
+                return;
+            }
+            fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${place}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.length === 0) {
+                    alert("❌ Location not found!");
+                    return;
+                }
+                let lat = parseFloat(data[0].lat);
+                let lon = parseFloat(data[0].lon);
+                localStorage.setItem(`location_${employeeID}`, JSON.stringify({ 
+                    name: place, latitude: lat, longitude: lon 
+                }));
+                document.getElementById("savedLocation").innerText = `${place} (Lat: ${lat}, Lon: ${lon})`;
+                alert("✅ Location Updated for Remote Employee!");
+            })
+            .catch(() => alert("❌ Error fetching location!"));
+        }
+
+        // Employee Attendance Logic
+        let map, assignedMarker, currentMarker;
+
+        function initializeMap(lat, lon) {
+            map = L.map('map').setView([lat, lon], 15);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '© OpenStreetMap'
+            }).addTo(map);
+        }
+
+        function updateMap(workLat, workLon, empLat, empLon) {
+            if (assignedMarker) map.removeLayer(assignedMarker);
+            if (currentMarker) map.removeLayer(currentMarker);
+            assignedMarker = L.marker([workLat, workLon]).addTo(map).bindPopup('Assigned Location').openPopup();
+            currentMarker = L.marker([empLat, empLon]).addTo(map).bindPopup('Your Current Location').openPopup();
+            map.fitBounds([[workLat, workLon], [empLat, empLon]]);
+        }
+
+        function getDistance(lat1, lon1, lat2, lon2) {
+            let R = 6371; 
+            let dLat = (lat2 - lat1) * Math.PI / 180;
+            let dLon = (lon2 - lon1) * Math.PI / 180;
+            let a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+            let c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c * 1000;
+        }
+
+        function logDebug(message) {
+            const debugLog = document.getElementById("debugLog");
+            debugLog.innerHTML += `[${new Date().toLocaleTimeString()}] ${message}<br>`;
+            debugLog.scrollTop = debugLog.scrollHeight;
+            console.log(message);
+        }
+
+        let lastUpdateTime = 0;
+        let isLocationConfirmed = false;
+        function checkMobileNetworkLocation() {
+            if (!navigator.geolocation) {
+                document.getElementById("status").innerText = "⚠️ Geolocation not supported!";
+                logDebug("Geolocation API not available.");
+                return;
+            }
+
+            let employeeID = localStorage.getItem("lastEmployeeID") || prompt("Enter Employee ID (101 for Office, 102 for Remote):");
+            localStorage.setItem("lastEmployeeID", employeeID);
+
+            let locationData = localStorage.getItem(`location_${employeeID}`);
+            if (!locationData) {
+                alert("❌ No location assigned! Contact Admin.");
+                document.getElementById("Employee").innerHTML = "<h2>Access Denied</h2>";
+                return;
+            }
+
+            locationData = JSON.parse(locationData);
+            document.getElementById("assignedLocation").innerText = locationData.name;
+            let workLat = parseFloat(locationData.latitude);
+            let workLon = parseFloat(locationData.longitude);
+
+            let attempts = 0;
+            const maxAttempts = 5;
+
+            let watchId = navigator.geolocation.watchPosition(
+                position => {
+                    const now = Date.now();
+                    if (now - lastUpdateTime < 2000 || isLocationConfirmed) return; // Throttle and stop if confirmed
+                    lastUpdateTime = now;
+
+                    let empLat = position.coords.latitude;
+                    let empLon = position.coords.longitude;
+                    let accuracy = position.coords.accuracy;
+
+                    logDebug(`Initial coords: Lat: ${empLat}, Lon: ${empLon}, Accuracy: ${accuracy}m`);
+
+                    if (accuracy > 500) {
+                        attempts++;
+                        document.getElementById("status").innerText = `⌛ Accuracy too low (${accuracy.toFixed(0)}m > 500m), attempt ${attempts}/${maxAttempts}`;
+                        logDebug(`Accuracy too low, attempt ${attempts}/${maxAttempts}`);
+                        if (attempts >= maxAttempts) {
+                            document.getElementById("forceLocation").style.display = "block";
+                            document.getElementById("manualConfirm").style.display = "block";
+                        }
+                        return;
+                    }
+
+                    let distance = getDistance(empLat, empLon, workLat, workLon);
+
+                    if (!map) initializeMap(empLat, empLon);
+                    updateMap(workLat, workLon, empLat, empLon);
+                    document.getElementById("currentLocation").innerText = `Lat: ${empLat}, Lon: ${empLon} (Accuracy: ${accuracy.toFixed(0)}m)`;
+
+                    if (distance <= 300) {
+                        document.getElementById("status").innerText = "✅ You are in the correct location!";
+                        document.getElementById("markAttendance").disabled = false;
+                        isLocationConfirmed = true; // Stop further updates
+                        navigator.geolocation.clearWatch(watchId);
+                    } else {
+                        document.getElementById("status").innerText = `❌ You are ${distance.toFixed(0)}m outside the workplace!`;
+                        document.getElementById("manualConfirm").style.display = "block";
+                        document.getElementById("forceLocation").style.display = "block";
+                        logDebug(`Employee ${distance.toFixed(0)}m away from assigned location.`);
+                    }
+                },
+                error => {
+                    document.getElementById("status").innerText = "⚠️ GPS failed: " + error.message;
+                    document.getElementById("manualConfirm").style.display = "block";
+                    document.getElementById("forceLocation").style.display = "block";
+                    logDebug("Geolocation error: " + error.message);
+                    if (error.code === error.PERMISSION_DENIED) {
+                        alert("❌ Location permission denied. Please enable it in your browser settings.");
+                    }
+                },
+                {
+                    enableHighAccuracy: true,
+                    timeout: 20000,
+                    maximumAge: 0
+                }
+            );
+        }
+
+        function forceLocationOverride() {
+            if (confirm("Accuracy is low. Do you want to force use of the current location?")) {
+                let employeeID = localStorage.getItem("lastEmployeeID");
+                let locationData = JSON.parse(localStorage.getItem(`location_${employeeID}`));
+                let empLat = parseFloat(document.getElementById("currentLocation").innerText.match(/Lat: ([\d.]+)/)[1]);
+                let empLon = parseFloat(document.getElementById("currentLocation").innerText.match(/Lon: ([\d.]+)/)[1]);
+                let distance = getDistance(empLat, empLon, locationData.latitude, locationData.longitude);
+
+                if (distance <= 300) {
+                    document.getElementById("status").innerText = "✅ Forced: You are in the correct location!";
+                    document.getElementById("markAttendance").disabled = false;
+                } else {
+                    document.getElementById("status").innerText = `❌ Forced: You are ${distance.toFixed(0)}m outside the workplace!`;
+                    document.getElementById("manualConfirm").style.display = "block";
+                }
+                logDebug("Location forced by user.");
+            }
+        }
+
+        function manualConfirmLocation() {
+            let adminApproval = confirm("Do you want to request admin approval for attendance?");
+            if (adminApproval) {
+                alert("✅ Admin will review your location!");
+                document.getElementById("markAttendance").disabled = false;
+            } else {
+                alert("❌ Attendance denied!");
+            }
+        }
+
+        document.getElementById("markAttendance").addEventListener("click", function() {
+            let employeeID = localStorage.getItem("lastEmployeeID");
+            let locationData = JSON.parse(localStorage.getItem(`location_${employeeID}`));
+            let timestamp = new Date().toISOString();
+            localStorage.setItem(`attendance_${employeeID}`, JSON.stringify({
+                timestamp: timestamp,
+                fullLocation: locationData.name
+            }));
+            alert("✅ Attendance Marked Successfully!");
+            logDebug(`Attendance marked for Employee ${employeeID}`);
+        });
+
+        function requestLocation() {
+            navigator.geolocation.getCurrentPosition(
+                position => {
+                    let lat = position.coords.latitude;
+                    let lon = position.coords.longitude;
+                    let accuracy = position.coords.accuracy;
+                    logDebug(`Manual request: Lat: ${lat}, Lon: ${lon}, Accuracy: ${accuracy}m`);
+                    if (accuracy > 500) {
+                        alert(`⚠️ Location accuracy too low (${accuracy.toFixed(0)}m). Please ensure GPS is enabled and try again outdoors.`);
+                    } else {
+                        alert(`✅ Location Access Granted! Lat: ${lat}, Lon: ${lon}`);
+                    }
+                },
+                error => {
+                    alert("❌ Error getting location: " + error.message);
+                    logDebug("Manual request error: " + error.message);
+                },
+                {
+                    enableHighAccuracy: true,
+                    timeout: 20000,
+                    maximumAge: 0
+                }
+            );
+        }
+
+        // Initialize Admin Panel
+        loadLocations();
+        updateEmployeeSelection();
+    </script>
+</body>
+</html>
